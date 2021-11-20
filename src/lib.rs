@@ -152,6 +152,7 @@ pub use sync::SyncSession;
 #[derive(Debug, PartialEq)]
 pub enum SnmpError {
     InvalidOid,
+    InvalidTableIndex,
 
     AsnParseError,
     AsnInvalidLen,
@@ -161,6 +162,9 @@ pub enum SnmpError {
     AsnIntOverflow,
     AsnBufferOverflow,
 
+    SessionError,
+    ParameterMissing,
+    ParameterError,
     UnsupportedVersion,
     RequestIdMismatch,
     CommunityMismatch,
@@ -174,6 +178,17 @@ pub enum SnmpError {
 impl fmt::Display for SnmpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self, f)
+    }
+}
+
+impl Into<String> for SnmpError {
+    fn into(self) -> String {
+        format!("{}", self)
+    }
+}
+impl Into<String> for &SnmpError {
+    fn into(self) -> String {
+        format!("{}", self)
     }
 }
 
@@ -1203,6 +1218,23 @@ pub enum Value {
     SnmpReport(AsnReader),
 }
 
+fn hex_from_digit(num: u8) -> char {
+    if num < 10 {
+        (b'0' + num) as char
+    } else {
+        (b'A' + num - 10) as char
+    }
+}
+pub fn hex_push(buf: &mut String, blob: &[u8], sep: &str) {
+    for ch in blob {
+        buf.push(hex_from_digit(ch / 16));
+        buf.push(hex_from_digit(ch % 16));
+        if sep.len() > 0 {
+            buf.push_str(sep);
+        }
+    }
+}
+
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Value::*;
@@ -1210,7 +1242,13 @@ impl fmt::Debug for Value {
             Boolean(v) => write!(f, "BOOLEAN: {}", v),
             Integer(n) => write!(f, "INTEGER: {}", n),
             OctetString(ref slice) => {
-                write!(f, "OCTET STRING: {}", String::from_utf8_lossy(&slice))
+                if let Ok(val) = core::str::from_utf8(&slice) {
+                    write!(f, "OCTET STRING: {}", val)
+                } else {
+                    let mut tmps = String::with_capacity(3 * slice.len());
+                    hex_push(&mut tmps, slice, " ");
+                    write!(f, "Hex-STRING: {0}", tmps.trim())
+                }
             }
             ObjectIdentifier(ref obj_id) => write!(f, "OBJECT IDENTIFIER: {}", obj_id),
             Null => write!(f, "NULL"),
