@@ -1265,6 +1265,20 @@ impl Iterator for AsnReader {
                 snmp::TYPE_TIMETICKS => self.read_snmp_timeticks().map(Timeticks),
                 snmp::TYPE_OPAQUE => self.read_snmp_opaque().map(Opaque),
                 snmp::TYPE_COUNTER64 => self.read_snmp_counter64().map(Counter64),
+                snmp::SNMP_NOSUCHOBJECT => {
+                    match self.read_raw(snmp::SNMP_NOSUCHOBJECT) 
+                    { 
+                        Ok(_) => Ok(Value::NoSuchObject),
+                        Err(err) => Err(err),
+                    }
+                },
+                snmp::SNMP_NOSUCHINSTANCE => {
+                    match self.read_raw(snmp::SNMP_NOSUCHINSTANCE) 
+                    { 
+                        Ok(_) => Ok(Value::NoSuchInstance),
+                        Err(err) => Err(err),
+                    }
+                },
                 snmp::MSG_GET => self
                     .read_raw(ident)
                     .map(|v| SnmpGetRequest(AsnReader::from_bytes(v))),
