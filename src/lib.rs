@@ -1279,6 +1279,13 @@ impl Iterator for AsnReader {
                         Err(err) => Err(err),
                     }
                 },
+               snmp::SNMP_ENDOFMIBVIEW => {
+                    match self.read_raw(snmp::SNMP_ENDOFMIBVIEW) 
+                    { 
+                        Ok(_) => Ok(Value::EndOfMibView),
+                        Err(err) => Err(err),
+                    }
+                },
                 snmp::MSG_GET => self
                     .read_raw(ident)
                     .map(|v| SnmpGetRequest(AsnReader::from_bytes(v))),
