@@ -129,8 +129,10 @@
 #![cfg_attr(feature = "private-tests", feature(test))]
 #![allow(unknown_lints, clippy::doc_markdown)]
 
+use std::error::Error;
 use std::net::IpAddr;
 use std::time::Duration;
+use std::convert::{TryFrom, TryInto};
 use std::{fmt, mem, ptr};
 
 #[cfg(target_pointer_width = "32")]
@@ -147,6 +149,7 @@ mod tests;
 
 #[cfg(feature = "async")]
 pub use r#async::AsyncSession;
+use snmp::SNMP_NOSUCHOBJECT;
 pub use sync::SyncSession;
 
 #[derive(Debug, PartialEq)]
@@ -173,6 +176,21 @@ pub enum SnmpError {
     SocketError,
     SendError,
     ReceiveError,
+    ReceiveTimeout,
+    Other(String),
+}
+impl Error for SnmpError { }
+
+impl Value{
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::EndOfMibView |
+            Self::NoSuchObject |
+            Self::NoSuchInstance => false,
+            _ => true,
+        }
+    
+    }
 }
 
 impl fmt::Display for SnmpError {
@@ -194,8 +212,84 @@ impl Into<String> for &SnmpError {
 
 pub type SnmpResult<T> = Result<T, SnmpError>;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq, PartialOrd)]
 pub struct Oid(pub Vec<u32>);
+
+impl Default for Oid {
+    fn default() -> Self {
+        Self::get_invalid()
+    }
+}
+
+impl Oid {
+    pub const MAX: &'static [u32; 1] = &[u32::MAX];
+
+    pub const MAX_LENGTH: usize = 128;
+
+    pub fn get_invalid() -> Self {
+        Self::from(Self::MAX.as_ref())
+    }
+
+    /// Check if this OID is of valid form < 129
+    pub fn is_valid(&self) -> bool {
+        (self.0.len() <= Self::MAX_LENGTH) &&
+         (self.0 != Self::MAX)
+    }
+
+    /// Extract the Index from OID, returns error[SnmpError::InvalidOid] if :
+    pub fn add_index(&mut self, index: &Self) 
+       -> Result<(), SnmpError>
+    {
+        if (self.0.len() + index.0.len() ) < Self::MAX_LENGTH {
+            Ok(self.0.extend(index.0.clone()))
+        } else {
+            Err(SnmpError::InvalidOid)
+        }
+    }
+
+    pub fn add_index_str(&mut self, index_str: &str) 
+       -> Result<(), SnmpError>
+    {
+        if let Some(index) = Self::from_str(index_str).ok() {
+            self.add_index(&index)
+        } else {
+            Err(SnmpError::InvalidOid)
+        }
+    }
+
+    /// Extract the Index from OID, returns error[SnmpError::InvalidOid] if :
+    ///   base is not part of Self
+    ///   Self.len() <= base.len()
+    pub fn get_index(&self, base: &Self)
+        -> Result<Self, SnmpError>
+    {
+        let base_len = base.0.len();
+        if self.0.len() > base_len {
+            let vec_sub = &self.0[..base_len];
+            if vec_sub == base.0 {
+                let vec_rest = &self.0[base_len..];
+                Ok(Self{0: vec_rest.to_vec()})
+            } else {
+                Err(SnmpError::InvalidOid)
+            }
+        } else {
+            Err(SnmpError::InvalidOid)
+        }
+    }
+
+    pub fn get_index_str(&self, base: &Self)
+        -> Option<String>
+    {
+        match self.get_index(base){
+            Ok(val) => {
+                Some(val.to_string())
+            },
+            Err(_) => {
+                None
+            },
+        }
+    }
+}
 
 pub use std::str::FromStr;
 
@@ -229,12 +323,49 @@ impl FromStr for Oid {
         }
     }
 }
+impl fmt::Debug for Oid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "OID[")?;
+        for curr in &self.0 {
+            write!(f, ".{}", curr)?;
+        }
+        write!(f, "]")
+    }
+}
+impl fmt::Display for Oid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut cnt = -1;
+        let mut retval = String::with_capacity(32);
+        for curr in &self.0 {
+            cnt += 1;
+            if cnt > 0 
+            {   retval.push('.');}
+            retval.push_str(&curr.to_string());
+        }
+        write!(f, "{}", retval)
+    }
+}
+
+
+impl From<&[u32]> for Oid {
+    fn from(src: &[u32]) -> Self {
+        Self{0: src.to_vec()}
+    }
+}
 
 impl AsRef<[u32]> for Oid {
     fn as_ref(&self) -> &[u32] {
         self.0.as_ref()
     }
 }
+
+impl TryFrom<ObjectIdentifier> for Oid {
+  type Error = SnmpError;
+    fn try_from(src: ObjectIdentifier) -> Result<Self, Self::Error> {
+        Ok(Self{0: src.try_into()?})
+    }
+}
+
 
 pub struct ResponseItem {
     pub address: IpAddr,
@@ -268,6 +399,7 @@ pub mod asn1 {
 
     pub const TYPE_BOOLEAN: u8 = CLASS_UNIVERSAL | PRIMITIVE | 1;
     pub const TYPE_INTEGER: u8 = CLASS_UNIVERSAL | PRIMITIVE | 2;
+    pub const TYPE_BITSTRING: u8 = CLASS_UNIVERSAL | PRIMITIVE | 3;
     pub const TYPE_OCTETSTRING: u8 = CLASS_UNIVERSAL | PRIMITIVE | 4;
     pub const TYPE_NULL: u8 = CLASS_UNIVERSAL | PRIMITIVE | 5;
     pub const TYPE_OBJECTIDENTIFIER: u8 = CLASS_UNIVERSAL | PRIMITIVE | 6;
@@ -298,6 +430,11 @@ pub mod snmp {
     pub const TYPE_TIMETICKS: u8 = asn1::CLASS_APPLICATION | 3;
     pub const TYPE_OPAQUE: u8 = asn1::CLASS_APPLICATION | 4;
     pub const TYPE_COUNTER64: u8 = asn1::CLASS_APPLICATION | 6;
+    pub const TYPE_FLOAT: u8 = asn1::CLASS_APPLICATION | 8;
+    pub const TYPE_DOUBLE: u8 = asn1::CLASS_APPLICATION | 9;
+    pub const TYPE_APP_I64: u8 = asn1::CLASS_APPLICATION | 10;
+    pub const TYPE_APP_U64: u8 = asn1::CLASS_APPLICATION | 11;
+    // https://github.com/hardaker/net-snmp/blob/master/include/net-snmp/library/asn1.h
 
     pub const SNMP_NOSUCHOBJECT: u8 = asn1::CLASS_CONTEXTSPECIFIC | asn1::PRIMITIVE | 0x0; /* 80=128 */
     pub const SNMP_NOSUCHINSTANCE: u8 = asn1::CLASS_CONTEXTSPECIFIC | asn1::PRIMITIVE | 0x1; /* 81=129 */
@@ -798,7 +935,7 @@ fn decode_i64(i: &[u8]) -> SnmpResult<i64> {
 }
 
 /// Wrapper around raw bytes representing an ASN.1 OBJECT IDENTIFIER.
-#[derive(PartialEq)]
+#[derive(PartialEq, PartialOrd)]
 pub struct ObjectIdentifier {
     inner: Vec<u8>,
 }
@@ -806,6 +943,19 @@ pub struct ObjectIdentifier {
 impl fmt::Debug for ObjectIdentifier {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_list().entries(&self.inner).finish()
+    }
+}
+
+impl TryInto<Vec<u32>> for ObjectIdentifier {
+    type Error = SnmpError;
+    fn try_into(self) -> Result<Vec<u32>, Self::Error> {
+        let mut buf: ObjIdBuf = [0; 128];
+        match self.read_name(&mut buf) {
+            Ok(name) => {
+                Ok(name.to_vec())
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -831,6 +981,30 @@ impl fmt::Display for ObjectIdentifier {
         }
     }
 }
+
+/*
+impl PartialOrd<ObjectIdentifier> for ObjectIdentifier {
+    fn le(&self, other: &ObjectIdentifier) -> bool {
+        self.inner.iter().le(other.inner.iter())
+    }
+
+    fn lt(&self, other: &ObjectIdentifier) -> bool {
+        self.inner.iter().lt(other.inner.iter())
+    }
+
+    fn gt(&self, other: &ObjectIdentifier) -> bool {
+        self.inner.iter().gt(other.inner.iter())
+    }
+
+    fn ge(&self, other: &ObjectIdentifier) -> bool {
+        self.inner.iter().ge(other.inner.iter())
+    }
+
+    fn partial_cmp(&self, other: &ObjectIdentifier) -> Option<std::cmp::Ordering> {
+        self.inner.partial_cmp(&other.inner)
+    }
+}
+*/
 
 impl PartialEq<[u32]> for ObjectIdentifier {
     fn eq(&self, other: &[u32]) -> bool {
@@ -1192,6 +1366,7 @@ pub enum Value {
     Null,
     Integer(i64),
     OctetString(Vec<u8>),
+    BitString(Vec<u8>),
     ObjectIdentifier(ObjectIdentifier),
     Sequence(AsnReader),
     Set(AsnReader),
@@ -1203,6 +1378,8 @@ pub enum Value {
     Timeticks(u32),
     Opaque(Vec<u8>),
     Counter64(u64),
+    //Float(f32),
+    //Double(f64),
 
     EndOfMibView,
     NoSuchObject,
@@ -1235,6 +1412,57 @@ pub fn hex_push(buf: &mut String, blob: &[u8], sep: &str) {
     }
 }
 
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use Value::*;
+        match *self {
+            Boolean(v) => write!(f, "{}", v),
+            Integer(n) => write!(f, "{}", n),
+            OctetString(ref slice) => {
+                if let Ok(val) = core::str::from_utf8(&slice) {
+                    write!(f, "{}", val)
+                } else {
+                    let mut tmps = String::with_capacity(3 * slice.len());
+                    hex_push(&mut tmps, slice, " ");
+                    write!(f, "{0}", tmps.trim())
+                }
+            }
+            BitString(ref slice) => {
+                let mut tmps = String::with_capacity(3 * slice.len());
+                hex_push(&mut tmps, slice, " ");
+                write!(f, "{0}", tmps.trim())
+            }
+            //Float(ref val) =>  write!(f, "FLOAT: {}", val),
+            //Double(ref val) =>  write!(f, "DOUBLE: {}", val),
+
+            ObjectIdentifier(ref obj_id) => write!(f, "{}", obj_id),
+            Null => write!(f, "NULL"),
+            Sequence(ref val) => write!(f, "{:#?}", val),
+            Set(ref val) => write!(f, "{:?}", val),
+            Constructed(_ident, ref val) => write!(f, "{:#?}", val),
+
+            IpAddress(val) => write!(f, "{}.{}.{}.{}", val[0], val[1], val[2], val[3]),
+            Counter32(val) => write!(f, "{}", val),
+            Unsigned32(val) => write!(f, "{}", val),
+            Timeticks(val) => write!(f, "{}", val),
+            Opaque(ref val) => write!(f, "{:?}", val),
+            Counter64(val) => write!(f, "{}", val),
+        
+            EndOfMibView => write!(f, "END OF MIB VIEW"),
+            NoSuchObject => write!(f, "NO SUCH OBJECT"),
+            NoSuchInstance => write!(f, "NO SUCH INSTANCE"),
+            SnmpGetRequest(ref val) => write!(f, "SNMP GET REQUEST: {:#?}", val),
+            SnmpGetNextRequest(ref val) => write!(f, "SNMP GET NEXT REQUEST: {:#?}", val),
+            SnmpGetBulkRequest(ref val) => write!(f, "SNMP GET BULK REQUEST: {:#?}", val),
+            SnmpResponse(ref val) => write!(f, "SNMP RESPONSE: {:#?}", val),
+            SnmpSetRequest(ref val) => write!(f, "SNMP SET REQUEST: {:#?}", val),
+            SnmpInformRequest(ref val) => write!(f, "SNMP INFORM REQUEST: {:#?}", val),
+            SnmpTrap(ref val) => write!(f, "SNMP TRAP: {:#?}", val),
+            SnmpReport(ref val) => write!(f, "SNMP REPORT: {:#?}", val),
+        }
+    }
+}
+
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use Value::*;
@@ -1250,6 +1478,14 @@ impl fmt::Debug for Value {
                     write!(f, "Hex-STRING: {0}", tmps.trim())
                 }
             }
+            BitString(ref slice) => {
+                let mut tmps = String::with_capacity(3 * slice.len());
+                hex_push(&mut tmps, slice, " ");
+                write!(f, "Hex-STRING: {0}", tmps.trim())
+            }
+            //Float(ref val) =>  write!(f, "FLOAT: {}", val),
+            //Double(ref val) =>  write!(f, "DOUBLE: {}", val),
+
             ObjectIdentifier(ref obj_id) => write!(f, "OBJECT IDENTIFIER: {}", obj_id),
             Null => write!(f, "NULL"),
             Sequence(ref val) => write!(f, "SEQUENCE: {:#?}", val),
@@ -1262,7 +1498,7 @@ impl fmt::Debug for Value {
             Timeticks(val) => write!(f, "TIMETICKS: {}", val),
             Opaque(ref val) => write!(f, "OPAQUE: {:?}", val),
             Counter64(val) => write!(f, "COUNTER64: {}", val),
-
+        
             EndOfMibView => write!(f, "END OF MIB VIEW"),
             NoSuchObject => write!(f, "NO SUCH OBJECT"),
             NoSuchInstance => write!(f, "NO SUCH INSTANCE"),
@@ -1289,6 +1525,7 @@ impl Iterator for AsnReader {
                 asn1::TYPE_BOOLEAN => self.read_asn_boolean().map(Boolean),
                 asn1::TYPE_NULL => self.read_asn_null().map(|_| Null),
                 asn1::TYPE_INTEGER => self.read_asn_integer().map(Integer),
+                asn1::TYPE_BITSTRING => self.read_asn_octetstring().map(BitString),
                 asn1::TYPE_OCTETSTRING => self.read_asn_octetstring().map(OctetString),
                 asn1::TYPE_OBJECTIDENTIFIER => {
                     self.read_asn_objectidentifier().map(ObjectIdentifier)
@@ -1303,6 +1540,8 @@ impl Iterator for AsnReader {
                 snmp::TYPE_TIMETICKS => self.read_snmp_timeticks().map(Timeticks),
                 snmp::TYPE_OPAQUE => self.read_snmp_opaque().map(Opaque),
                 snmp::TYPE_COUNTER64 => self.read_snmp_counter64().map(Counter64),
+                //snmp::TYPE_FLOAT => self.read_snmp_opaque().map(Float),
+                //snmp::TYPE_DOUBLE => self.read_snmp_opaque().map(Double),
                 snmp::SNMP_NOSUCHOBJECT     => self.read_raw(snmp::SNMP_NOSUCHOBJECT).map(|_| NoSuchObject),
                 snmp::SNMP_NOSUCHINSTANCE   => self.read_raw(snmp::SNMP_NOSUCHINSTANCE).map(|_| NoSuchInstance),
                 snmp::SNMP_ENDOFMIBVIEW     => self.read_raw(snmp::SNMP_ENDOFMIBVIEW).map(|_| EndOfMibView),
