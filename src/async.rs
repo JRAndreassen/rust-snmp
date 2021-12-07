@@ -30,7 +30,7 @@ impl AsyncRequest {
         match self.timeout {
             Some(timeout) => tokio::time::timeout(timeout, fut)
                 .await
-                .map_err(|_| SnmpError::ReceiveError)?,
+                .map_err(|_| SnmpError::ReceiveTimeout)?,
             None => fut.await,
         }
         .map_err(|_| SnmpError::ReceiveError)
