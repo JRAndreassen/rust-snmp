@@ -149,7 +149,7 @@ mod tests;
 
 #[cfg(feature = "async")]
 pub use r#async::AsyncSession;
-use snmp::SNMP_NOSUCHOBJECT;
+//use snmp::SNMP_NOSUCHOBJECT;
 pub use sync::SyncSession;
 
 #[derive(Debug, PartialEq)]
